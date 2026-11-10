@@ -10,6 +10,8 @@ export interface EngineOptions {
   reducedMotion: boolean;
   /** Freeze all motion at the painted rest pose (used for composition review). */
   still?: boolean;
+  /** Debug: a single koi and no plants, for reviewing swimming in isolation. */
+  solo?: boolean;
 }
 
 export type SpawnKind = "koi" | "pad" | "lotus";
@@ -205,16 +207,25 @@ export class PondEngine {
   /** The fixed opening scene: three koi and a few lily pads. Reset restores exactly this. */
   private populateStartingScene() {
     const rng = mulberry32(20240611);
-    const k1 = this.makeKoi("kohaku", 0.62, 0.5, -0.5, rng, 0.42);
+    this.makeKoi("kohaku", 0.62, 0.5, -0.5, rng, 0.42);
     const k2 = this.makeKoi("showa", 1.0, 0.64, Math.PI * 0.85, rng, 0.36);
     const k3 = this.makeKoi("gold", 0.86, 0.3, 0.25, rng, 0.31);
-    for (const k of [k1, k2, k3]) k.fade = 0.0;
+    if (this.opts.solo) {
+      for (const k of [k2, k3]) this.removeNow(k);
+      return;
+    }
     const pad = (i: number, d: number, x: number, y: number) => this.makePlant("pad", i, d, x, y, rng);
     pad(0, 0.3, 0.38, 0.3);
     pad(7, 0.16, 1.24, 0.3);
     pad(9, 0.21, 1.02, 0.78);
     pad(2, 0.17, 0.52, 0.76);
     pad(11, 0.075, 1.3, 0.62);
+  }
+
+  private removeNow(k: Koi) {
+    this.underScene.remove(k.mesh);
+    k.dispose();
+    this.koi.splice(this.koi.indexOf(k), 1);
   }
 
   private clearAll(fastFade: boolean) {
@@ -397,6 +408,7 @@ export class PondEngine {
         heading: k.heading,
         length: k.params.length,
         spine: k.getSpine(),
+        baseSpine: k.getBaseSpine(),
       })),
       plants: this.plants.map((p) => ({ kind: p.kind, dying: p.dying, fade: p.fade, x: p.x, y: p.y, r: p.radius })),
     };

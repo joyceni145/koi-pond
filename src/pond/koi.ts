@@ -9,6 +9,8 @@ const NX = 72;
 const NY = 30;
 /** Joints in the simulated spine chain. */
 const NJ = 26;
+/** Spacing of recorded head-path points (world units). */
+const TRAIL_STEP = 0.005;
 
 export interface KoiParams {
   length: number;
@@ -59,6 +61,9 @@ export class Koi {
   private readonly joints = new Float32Array(NJ * 2);
   private readonly waved = new Float32Array(NJ * 2);
   private readonly segLen: number;
+  /** Recorded head path (oldest first). Joints are placed at fixed arc lengths back along it. */
+  private trailX: number[] = [];
+  private trailY: number[] = [];
   private clock: number;
   private wanderA: number;
   private wanderB: number;
@@ -98,6 +103,11 @@ export class Koi {
       this.joints[i * 2 + 1] = y - Math.sin(heading) * this.segLen * i;
     }
     this.waved.set(this.joints);
+    const back = params.length * 1.25;
+    for (let d = back; d > 0; d -= TRAIL_STEP) {
+      this.trailX.push(x - Math.cos(heading) * d);
+      this.trailY.push(y - Math.sin(heading) * d);
+    }
 
     // Rest-pose column table, sampled from the extracted spine/body profile.
     const sMin = (asset.xHead - asset.width) / this.lengthPx;
@@ -189,51 +199,62 @@ export class Koi {
       0.28 * Math.sin(t * 0.37 + this.wanderB) +
       0.12 * Math.sin(t * 0.83 + this.wanderC);
 
-    // Steer away from the faded edge, well before reaching it.
-    const inset = SAFE_INSET.fish;
-    const bx0 = inset, bx1 = POND_W - inset, by0 = inset, by1 = POND_H - inset;
-    const band = 0.2;
-    const pen = Math.max(bx0 + band - this.x, this.x - (bx1 - band), by0 + band - this.y, this.y - (by1 - band), 0);
-    if (pen > 0) {
-      const toCenter = Math.atan2(POND_H * 0.5 - this.y, POND_W * 0.5 - this.x);
-      const diff = angleDiff(this.heading, toCenter);
-      const w = smoothstep(0, band, pen);
-      want = want * (1 - w) + clamp(diff * 1.6, -1.1, 1.1) * w;
-    }
-
-    // Keep a courteous distance from other koi.
+    // Keep a courteous distance from other koi that swim at a similar depth.
     for (const o of ctx.others) {
       if (o === this || o.dying) continue;
       const dx = o.x - this.x;
       const dy = o.y - this.y;
       const d = Math.hypot(dx, dy);
-      const R = 0.22 + (this.params.length + o.params.length) * 0.15;
-      if (d < R && d > 1e-4) {
+      const sameLayer = 0.4 + 0.6 * (1 - smoothstep(0.15, 0.55, Math.abs(o.params.depth - p.depth)));
+      const R = 0.2 + (p.length + o.params.length) * 0.3;
+      if (d < R && d > 1e-4 && sameLayer > 0) {
         const rel = angleDiff(this.heading, Math.atan2(dy, dx));
-        if (Math.abs(rel) < 1.9) {
-          const push = (1 - d / R) * 1.3;
+        if (Math.abs(rel) < 2.1) {
+          const push = (1 - d / R) * 1.6 * sameLayer;
           want += (rel >= 0 ? -1 : 1) * push;
         }
       }
     }
+    want = clamp(want, -0.95, 0.95);
 
-    const maxTurn = 0.95;
-    want = clamp(want, -maxTurn, maxTurn);
+    // Steer away from the faded edge. A probe point ahead of the head lets the fish begin a
+    // wide, relaxed turn early; this takes priority over wandering and courtesy.
+    const inset = SAFE_INSET.fish;
+    const bx0 = inset, bx1 = POND_W - inset, by0 = inset, by1 = POND_H - inset;
+    const turnRadius = p.length / 2.1;
+    const look = turnRadius * 1.55 + 0.1;
+    const px = this.x + Math.cos(this.heading) * look;
+    const py = this.y + Math.sin(this.heading) * look;
+    const penAhead = Math.max(bx0 - px, px - bx1, by0 - py, py - by1, 0);
+    const penHere = Math.max(bx0 - this.x, this.x - bx1, by0 - this.y, this.y - by1, 0);
+    const wall = Math.max(smoothstep(0, 0.06, penAhead), smoothstep(0, 0.04, penHere));
+    if (wall > 0) {
+      const toCenter = Math.atan2(POND_H * 0.5 - this.y, POND_W * 0.5 - this.x);
+      const diff = angleDiff(this.heading, toCenter);
+      want = want * (1 - wall) + clamp(diff * 2.4, -1.5, 1.5) * wall;
+    }
+    // A koi's body can only bend so far: cap path curvature relative to body length so the
+    // spine always bends into a smooth arc instead of folding into a C.
+    const kappa = (1.35 + 0.75 * wall) / p.length;
+    const maxRate = Math.max(0.1, Math.max(this.speed, p.speed * 0.6) * kappa);
+    want = clamp(want, -maxRate, maxRate);
     // Angular inertia makes turns begin and end smoothly.
-    this.turnRate += (want - this.turnRate) * Math.min(1, dt * 1.6);
+    this.turnRate += (want - this.turnRate) * Math.min(1, dt * (1.6 + 3.0 * wall));
     this.heading += this.turnRate * dt * m;
 
     // Speed breathes gently and eases off through tight turns.
     const breathe = 1 + 0.16 * Math.sin(t * 0.33 + this.speedPhase);
-    const tight = 1 - 0.28 * Math.min(1, Math.abs(this.turnRate) / maxTurn);
+    const tight = 1 - 0.28 * Math.min(1, Math.abs(this.turnRate) / 0.95);
     const target = p.speed * breathe * tight * m;
     this.speed += (target - this.speed) * Math.min(1, dt * 1.2);
 
     this.x += Math.cos(this.heading) * this.speed * dt;
     this.y += Math.sin(this.heading) * this.speed * dt;
-    // Hard backstop; steering should make this unreachable in normal play.
-    this.x = clamp(this.x, 0.06, POND_W - 0.06);
-    this.y = clamp(this.y, 0.06, POND_H - 0.06);
+    // Soft backstop: a spring eases the head back inside the safe zone if steering (e.g. in a
+    // crowded pond) ever lets it drift out, so no fish ever reaches the faded boundary.
+    const pull = Math.min(1, dt * 4.5);
+    this.x += (clamp(this.x, bx0, bx1) - this.x) * pull;
+    this.y += (clamp(this.y, by0, by1) - this.y) * pull;
 
     // Beat frequency follows swimming speed so a faster fish flicks its tail faster.
     const speedRatio = p.speed > 0 ? clamp(this.speed / p.speed, 0.2, 1.4) : 1;
@@ -242,28 +263,72 @@ export class Koi {
     this.updateChain();
   }
 
-  /** Follow-the-leader: each joint is dragged to stay one segment behind its parent. */
+  /**
+   * The body follows the exact path the head has swum: each joint sits a fixed arc length
+   * behind the head along that path, so the tail can never swing outside where the head went.
+   */
   private updateChain() {
     const J = this.joints;
+    const tx = this.trailX, ty = this.trailY;
+    let n = tx.length;
+    const lastX = n ? tx[n - 1] : this.x, lastY = n ? ty[n - 1] : this.y;
+    if (Math.hypot(this.x - lastX, this.y - lastY) >= TRAIL_STEP) {
+      tx.push(this.x);
+      ty.push(this.y);
+      n++;
+    }
     J[0] = this.x;
     J[1] = this.y;
+    let px = this.x, py = this.y;
+    let k = n - 1;
+    let carried = 0;
     for (let i = 1; i < NJ; i++) {
-      const px = J[(i - 1) * 2];
-      const py = J[(i - 1) * 2 + 1];
-      let dx = J[i * 2] - px;
-      let dy = J[i * 2 + 1] - py;
-      const d = Math.hypot(dx, dy) || 1e-6;
-      dx /= d;
-      dy /= d;
-      J[i * 2] = px + dx * this.segLen;
-      J[i * 2 + 1] = py + dy * this.segLen;
-    }
-    // Light smoothing keeps sharp turns from kinking the body.
-    for (let pass = 0; pass < 2; pass++) {
-      for (let i = 1; i < NJ - 1; i++) {
-        J[i * 2] = J[i * 2] * 0.5 + (J[(i - 1) * 2] + J[(i + 1) * 2]) * 0.25;
-        J[i * 2 + 1] = J[i * 2 + 1] * 0.5 + (J[(i - 1) * 2 + 1] + J[(i + 1) * 2 + 1]) * 0.25;
+      const target = this.segLen * i;
+      for (;;) {
+        if (k < 0) {
+          // Ran out of recorded path (only possible right after spawning): hold the oldest point.
+          J[i * 2] = px;
+          J[i * 2 + 1] = py;
+          break;
+        }
+        const qx = tx[k], qy = ty[k];
+        const d = Math.hypot(qx - px, qy - py);
+        if (carried + d >= target) {
+          const f = d > 1e-9 ? (target - carried) / d : 0;
+          J[i * 2] = px + (qx - px) * f;
+          J[i * 2 + 1] = py + (qy - py) * f;
+          break;
+        }
+        carried += d;
+        px = qx;
+        py = qy;
+        k--;
       }
+      // continue the search from this joint's position
+      px = J[i * 2];
+      py = J[i * 2 + 1];
+      carried = target;
+      // `k` already points at the first trail point behind px,py (or the one just consumed)
+    }
+    // Drop path older than the body needs.
+    const keepLen = this.params.length * 1.3;
+    let acc = 0;
+    let cut = 0;
+    for (let q = n - 1; q > 0; q--) {
+      acc += Math.hypot(tx[q] - tx[q - 1], ty[q] - ty[q - 1]);
+      if (acc > keepLen) {
+        cut = q - 1;
+        break;
+      }
+    }
+    if (cut > 0) {
+      tx.splice(0, cut);
+      ty.splice(0, cut);
+    }
+    // One light smoothing pass removes the faceting of the polyline path.
+    for (let i = 1; i < NJ - 1; i++) {
+      J[i * 2] = J[i * 2] * 0.5 + (J[(i - 1) * 2] + J[(i + 1) * 2]) * 0.25;
+      J[i * 2 + 1] = J[i * 2 + 1] * 0.5 + (J[(i - 1) * 2 + 1] + J[(i + 1) * 2 + 1]) * 0.25;
     }
   }
 
@@ -369,8 +434,8 @@ export class Koi {
             dtan += -reach * L * 0.04 * Math.sin(ph + 0.9) * wFin;
           }
           if (wTail > 0) {
-            dn += reach * L * 0.07 * Math.sin(tailBeat - TAU * p.waveCycles * s - 0.9 + p.phase) * wTail;
-            dtan += reach * L * 0.03 * Math.sin(tailBeat * 2 - 1.2 + out * 0.08) * wTail;
+            dn += reach * L * 0.032 * Math.sin(tailBeat - TAU * p.waveCycles * s - 0.9 + p.phase) * wTail;
+            dtan += reach * L * 0.012 * Math.sin(tailBeat * 2 - 1.2 + out * 0.08) * wTail;
           }
           // Fine edge ripple on all translucent fin tissue.
           dn += side * L * 0.008 * Math.sin(TAU * 1.5 * tt + out * 0.11 + s * 9 + side) * reach;
@@ -392,6 +457,13 @@ export class Koi {
   getSpine(): { x: number; y: number }[] {
     const out: { x: number; y: number }[] = [];
     for (let i = 0; i < NJ; i++) out.push({ x: this.waved[i * 2], y: this.waved[i * 2 + 1] });
+    return out;
+  }
+
+  /** The follow-the-leader chain before the body wave is added. */
+  getBaseSpine(): { x: number; y: number }[] {
+    const out: { x: number; y: number }[] = [];
+    for (let i = 0; i < NJ; i++) out.push({ x: this.joints[i * 2], y: this.joints[i * 2 + 1] });
     return out;
   }
 

@@ -18,7 +18,7 @@ export const WORLD = {
 /** Inset from the pond rectangle inside which the painting is fully opaque. */
 export const SAFE_INSET = {
   /** Koi heads stay inside this inset. */
-  fish: 0.15,
+  fish: 0.235,
   /** Floating plants (centre minus their radius) stay inside this inset. */
   plant: 0.11,
   /** Taps outside this inset are ignored (the faded edge is not "water"). */
