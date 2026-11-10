@@ -1,0 +1,185 @@
+:root {
+  --paper: #f4f1ec;
+  --ink: #8a8274;
+  --ink-soft: rgba(112, 102, 86, 0.38);
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  overflow-x: hidden;
+  min-height: 100%;
+  background: var(--paper);
+  color: var(--ink);
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Warm paper tooth over the entire page (pond included) so the water reads as paint on paper. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+  background: url("/assets/paper.png") 0 0 / 512px 512px;
+  mix-blend-mode: multiply;
+}
+
+.page {
+  min-height: 100vh;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 2vh 0 3vh;
+  gap: 0;
+}
+
+/* The canvas covers the pond plus a feathering margin on every side. */
+.stage {
+  position: relative;
+  width: min(104vw, 1040px, calc((100vh - 150px) * 1.5));
+  width: min(104vw, 1040px, calc((100svh - 150px) * 1.5));
+  aspect-ratio: 1.8 / 1.2;
+  flex: none;
+}
+
+.pond-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+  outline: none;
+  opacity: 0;
+  transition: opacity 1.4s ease;
+}
+
+.pond-canvas.is-ready {
+  opacity: 1;
+}
+
+.pond-canvas:focus-visible {
+  outline: 1px dashed var(--ink-soft);
+  outline-offset: -8px;
+}
+
+.caption {
+  margin-top: clamp(-18px, -2vh, -6px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  text-align: center;
+  position: relative;
+  z-index: 2;
+}
+
+.caption p {
+  margin: 0;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+  font-style: italic;
+  font-size: clamp(14px, 1.6vw, 17px);
+  letter-spacing: 0.02em;
+  color: var(--ink);
+}
+
+.reset {
+  appearance: none;
+  font: inherit;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  background: transparent;
+  border: 1px solid var(--ink-soft);
+  border-radius: 999px;
+  padding: 7px 20px 8px;
+  cursor: pointer;
+  transition: background-color 0.3s ease, border-color 0.3s ease, transform 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.reset:hover {
+  background: rgba(120, 108, 88, 0.07);
+  border-color: rgba(112, 102, 86, 0.6);
+}
+
+.reset:active {
+  transform: scale(0.97);
+}
+
+.reset:focus-visible {
+  outline: 2px solid rgba(70, 120, 140, 0.55);
+  outline-offset: 3px;
+}
+
+.notice {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  text-align: center;
+  padding: 2rem;
+  font-style: italic;
+  color: var(--ink);
+}
+
+.reeds {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+/* Outer element anchors the clump's base; the inner sway pivots around it. */
+.reed {
+  position: absolute;
+  aspect-ratio: 228 / 360;
+  transform: translate(-50%, -94%);
+  opacity: 0;
+  transition: opacity 2s ease 0.6s;
+}
+
+.reed img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 94%;
+  animation: reed-sway var(--dur, 9s) ease-in-out var(--delay, 0s) infinite alternate;
+  user-select: none;
+}
+
+.pond-canvas.is-ready ~ .reeds .reed {
+  opacity: 0.92;
+}
+
+@keyframes reed-sway {
+  from {
+    rotate: calc(var(--amp, 1.4deg) * -1);
+  }
+  to {
+    rotate: var(--amp, 1.4deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reed img {
+    animation: none;
+  }
+  .pond-canvas {
+    transition: none;
+  }
+}
