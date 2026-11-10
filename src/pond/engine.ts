@@ -14,6 +14,8 @@ export interface EngineOptions {
   still?: boolean;
   /** Debug: a single koi and no plants, for reviewing swimming in isolation. */
   solo?: boolean;
+  /** Keep the drawing buffer so automated screenshots are deterministic. */
+  debug?: boolean;
 }
 
 export type SpawnKind = "koi" | "pad" | "lotus";
@@ -42,7 +44,8 @@ export class PondEngine {
   private readonly maskBakeMaterial: THREE.ShaderMaterial;
   private readonly maskBakeScene = new THREE.Scene();
   private maskTarget: THREE.WebGLRenderTarget;
-  private readonly fluid: FluidSim;
+  private fluid: FluidSim | null = null;
+  private readonly blankFlow: THREE.DataTexture;
   private splats: Splat[] = [];
   private detachInput: (() => void) | null = null;
   private wakeClock = 0;
@@ -74,6 +77,7 @@ export class PondEngine {
       alpha: true,
       antialias: false,
       premultipliedAlpha: true,
+      preserveDrawingBuffer: !!opts.debug,
       powerPreference: "high-performance",
     });
     this.renderer.setClearColor(0x000000, 0);
@@ -89,7 +93,18 @@ export class PondEngine {
       depthBuffer: false,
     });
 
-    this.fluid = new FluidSim(this.renderer);
+    this.blankFlow = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
+    this.blankFlow.needsUpdate = true;
+    // Rendering to half-float targets needs a WebGL extension; without it the pond keeps
+    // its ambient shimmer and simply skips the stirring simulation.
+    const ext = this.renderer.extensions;
+    if (ext.has("EXT_color_buffer_float") || ext.has("EXT_color_buffer_half_float")) {
+      try {
+        this.fluid = new FluidSim(this.renderer);
+      } catch (err) {
+        console.warn("Fluid simulation unavailable:", err);
+      }
+    }
 
     this.waterMaterial = new THREE.ShaderMaterial({
       vertexShader: FULLSCREEN_VERT,
@@ -110,8 +125,8 @@ export class PondEngine {
       fragmentShader: COMPOSITE_FRAG,
       uniforms: {
         tUnder: { value: this.underTarget.texture },
-        tFlow: { value: this.fluid.texture },
-        uFlowTexel: { value: new THREE.Vector2(1 / this.fluid.width, 1 / this.fluid.height) },
+        tFlow: { value: this.fluid?.texture ?? this.blankFlow },
+        uFlowTexel: { value: new THREE.Vector2(1 / (this.fluid?.width ?? 320), 1 / (this.fluid?.height ?? 213)) },
         uTime: { value: 0 },
         uAmbient: { value: opts.reducedMotion ? 0 : 1 },
         uStrength: { value: opts.reducedMotion ? 0.4 : 1 },
@@ -160,6 +175,9 @@ export class PondEngine {
     });
     this.mainScene.add(fullscreenQuad(this.maskMaterial, 1000));
 
+    canvas.addEventListener("webglcontextlost", this.onContextLost);
+    canvas.addEventListener("webglcontextrestored", this.onContextRestored);
+
     this.resize();
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
@@ -167,6 +185,19 @@ export class PondEngine {
     this.populateStartingScene();
     this.detachInput = attachPointerInput(canvas, this);
   }
+
+  private onContextLost = (e: Event) => {
+    e.preventDefault();
+    this.wasRunning = this.running;
+    this.stop();
+  };
+
+  private onContextRestored = () => {
+    this.applyPixelRatio();
+    this.fluid?.clear();
+    if (this.wasRunning) this.start();
+  };
+  private wasRunning = false;
 
   /* ------------------------------------------------------------------ sizing */
 
@@ -271,7 +302,7 @@ export class PondEngine {
     this.clearAll(true);
     this.populateStartingScene();
     this.splats = [];
-    this.fluid.clear();
+    this.fluid?.clear();
   }
 
   private liveCount(list: { dying: boolean }[]) {
@@ -361,7 +392,8 @@ export class PondEngine {
     const rawDt = (now - this.lastFrame) / 1000;
     this.lastFrame = now;
     const dt = clamp(rawDt, 0, 1 / 20);
-    this.frameMs += (rawDt * 1000 - this.frameMs) * 0.05;
+    // Ignore long gaps (hidden tab, debugger) so they never trigger a quality downgrade.
+    if (rawDt < 0.25) this.frameMs += (rawDt * 1000 - this.frameMs) * 0.05;
     this.adaptQuality();
     this.step(dt);
     this.render();
@@ -391,8 +423,12 @@ export class PondEngine {
     for (const p of this.plants) p.update(dt, this.opts.reducedMotion || this.opts.still ? 0 : 1);
     for (const k of this.koi) k.writeMesh(this.time, m);
     this.addKoiWakes(dt);
-    this.fluid.step(dt, this.splats.splice(0, MAX_SPLATS));
-    this.compositeMaterial.uniforms.tFlow.value = this.fluid.texture;
+    if (this.fluid) {
+      this.fluid.step(dt, this.splats.splice(0, MAX_SPLATS));
+      this.compositeMaterial.uniforms.tFlow.value = this.fluid.texture;
+    } else {
+      this.splats.length = 0;
+    }
     this.sweepDead();
   }
 
@@ -428,7 +464,7 @@ export class PondEngine {
       const x = x0 + dx * f;
       const y = y0 + dy * f;
       if (x < 0.02 || x > POND_W - 0.02 || y < 0.02 || y > POND_H - 0.02) continue;
-      this.pushSplat({ x, y, vx, vy, flow: 0.55 * power / Math.sqrt(n), height: -0.075 * power / Math.sqrt(n), radius });
+      this.pushSplat({ x, y, vx, vy, flow: 0.55 * power / Math.sqrt(n), height: -0.11 * power / Math.sqrt(n), radius });
     }
     const mid = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
     for (const p of this.plants) {
@@ -446,7 +482,7 @@ export class PondEngine {
   /** A tap: gentle splash where the new item arrives, then create the item. */
   tap(x: number, y: number) {
     const kind = this.spawnRandom(x, y);
-    this.pushSplat({ x, y, vx: 0, vy: 0, flow: 0, height: kind === "koi" ? -0.2 : -0.14, radius: 0.06 });
+    this.pushSplat({ x, y, vx: 0, vy: 0, flow: 0, height: kind === "koi" ? -0.3 : -0.21, radius: 0.075 });
     return kind;
   }
 
@@ -504,7 +540,7 @@ export class PondEngine {
 
   /** Debug: current peak flow / wave height in the water simulation. */
   fluidStats() {
-    return this.fluid.stats();
+    return this.fluid?.stats() ?? { peakFlow: 0, peakWave: 0, flowEnergy: 0 };
   }
 
   /** Debug: scale the refraction (0 disables it) to isolate its effect in comparisons. */
@@ -539,8 +575,11 @@ export class PondEngine {
     this.resizeObserver?.disconnect();
     for (const k of this.koi) k.dispose();
     for (const p of this.plants) p.dispose();
+    this.canvas.removeEventListener("webglcontextlost", this.onContextLost);
+    this.canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
     this.detachInput?.();
-    this.fluid.dispose();
+    this.fluid?.dispose();
+    this.blankFlow.dispose();
     this.underTarget.dispose();
     this.maskTarget.dispose();
     this.renderer.dispose();

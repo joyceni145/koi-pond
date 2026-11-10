@@ -48,6 +48,7 @@ export const PondCanvas = forwardRef<PondHandle>(function PondCanvas(_props, ref
           reducedMotion: motionQuery.matches,
           still: params.has("still"),
           solo: params.has("solo"),
+          debug: params.has("debug"),
         });
         engineRef.current = engine;
         if (params.has("debug")) window.__pond = engine;

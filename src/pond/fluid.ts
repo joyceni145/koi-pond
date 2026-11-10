@@ -50,8 +50,11 @@ void main(){
   float hD = texture2D(tState, vUv - vec2(0.0, uTexel.y)).z;
   float hU = texture2D(tState, vUv + vec2(0.0, uTexel.y)).z;
   float lap = hL + hR + hD + hU - 4.0 * h;
-  float hn = h + (h - hp) * 0.975 + 0.30 * lap;
-  hn *= 0.9985;
+  float hn = h + (h - hp) * 0.955 + 0.26 * lap;
+  // Viscosity: smears the wave crest so a disturbance blooms and dissolves instead of
+  // travelling outward as a crisp ring.
+  hn = mix(hn, (hL + hR + hD + hU) * 0.25, 0.30);
+  hn *= 0.998;
 
   // --- Stirring. Height is added to both time levels so a splat is a pure displacement.
   float inject = 0.0;
