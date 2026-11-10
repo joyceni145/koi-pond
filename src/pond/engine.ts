@@ -1,10 +1,12 @@
 import * as THREE from "three";
 import type { Assets } from "./assets";
 import { CAPS, KOI_VARIANTS, POND_H, POND_W, SAFE_INSET, SPAWN_ODDS, WORLD } from "./constants";
+import { FluidSim, MAX_SPLATS, type Splat } from "./fluid";
+import { attachPointerInput } from "./input";
 import { Koi, randomKoiParams } from "./koi";
 import { clamp, mulberry32, range, type Rng } from "./math";
 import { Plant, type PlantKind } from "./plants";
-import { COMPOSITE_FRAG, FULLSCREEN_VERT, MASK_FRAG, WATER_FRAG } from "./shaders";
+import { COMPOSITE_FRAG, FULLSCREEN_VERT, MASK_APPLY_FRAG, MASK_FRAG, WATER_FRAG } from "./shaders";
 
 export interface EngineOptions {
   reducedMotion: boolean;
@@ -37,7 +39,13 @@ export class PondEngine {
   private readonly waterMaterial: THREE.ShaderMaterial;
   private readonly compositeMaterial: THREE.ShaderMaterial;
   private readonly maskMaterial: THREE.ShaderMaterial;
-  private readonly blankFlow: THREE.DataTexture;
+  private readonly maskBakeMaterial: THREE.ShaderMaterial;
+  private readonly maskBakeScene = new THREE.Scene();
+  private maskTarget: THREE.WebGLRenderTarget;
+  private readonly fluid: FluidSim;
+  private splats: Splat[] = [];
+  private detachInput: (() => void) | null = null;
+  private wakeClock = 0;
 
   readonly koi: Koi[] = [];
   readonly plants: Plant[] = [];
@@ -81,8 +89,7 @@ export class PondEngine {
       depthBuffer: false,
     });
 
-    this.blankFlow = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat);
-    this.blankFlow.needsUpdate = true;
+    this.fluid = new FluidSim(this.renderer);
 
     this.waterMaterial = new THREE.ShaderMaterial({
       vertexShader: FULLSCREEN_VERT,
@@ -103,11 +110,11 @@ export class PondEngine {
       fragmentShader: COMPOSITE_FRAG,
       uniforms: {
         tUnder: { value: this.underTarget.texture },
-        tFlow: { value: this.blankFlow },
-        uFlowTexel: { value: new THREE.Vector2(1 / 320, 1 / 200) },
+        tFlow: { value: this.fluid.texture },
+        uFlowTexel: { value: new THREE.Vector2(1 / this.fluid.width, 1 / this.fluid.height) },
         uTime: { value: 0 },
         uAmbient: { value: opts.reducedMotion ? 0 : 1 },
-        uStrength: { value: 1 },
+        uStrength: { value: opts.reducedMotion ? 0.4 : 1 },
         uWorld: { value: new THREE.Vector2(WORLD.w, WORLD.h) },
       },
       depthTest: false,
@@ -115,7 +122,14 @@ export class PondEngine {
     });
     this.mainScene.add(fullscreenQuad(this.compositeMaterial, 0));
 
-    this.maskMaterial = new THREE.ShaderMaterial({
+    // The irregular pond mask never changes, so it is painted once per resize into a texture.
+    this.maskTarget = new THREE.WebGLRenderTarget(2, 2, {
+      type: THREE.UnsignedByteType,
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      depthBuffer: false,
+    });
+    this.maskBakeMaterial = new THREE.ShaderMaterial({
       vertexShader: FULLSCREEN_VERT,
       fragmentShader: MASK_FRAG,
       uniforms: {
@@ -124,6 +138,15 @@ export class PondEngine {
         uPond: { value: new THREE.Vector2(POND_W, POND_H) },
         uPx: { value: new THREE.Vector2(1, 1) },
       },
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.maskBakeScene.add(fullscreenQuad(this.maskBakeMaterial, 0));
+
+    this.maskMaterial = new THREE.ShaderMaterial({
+      vertexShader: FULLSCREEN_VERT,
+      fragmentShader: MASK_APPLY_FRAG,
+      uniforms: { tMask: { value: this.maskTarget.texture } },
       transparent: true,
       depthTest: false,
       depthWrite: false,
@@ -142,6 +165,7 @@ export class PondEngine {
     this.resizeObserver.observe(canvas);
 
     this.populateStartingScene();
+    this.detachInput = attachPointerInput(canvas, this);
   }
 
   /* ------------------------------------------------------------------ sizing */
@@ -168,7 +192,11 @@ export class PondEngine {
     this.renderer.setSize(w, h, false);
     this.underTarget.setSize(w, h);
     this.waterMaterial.uniforms.uPx.value.set(w, h);
-    this.maskMaterial.uniforms.uPx.value.set(w, h);
+    this.maskBakeMaterial.uniforms.uPx.value.set(w, h);
+    this.maskTarget.setSize(w, h);
+    this.renderer.setRenderTarget(this.maskTarget);
+    this.renderer.render(this.maskBakeScene, this.camera);
+    this.renderer.setRenderTarget(null);
   }
 
   private qualityCap = MAX_PIXEL_RATIO;
@@ -242,6 +270,8 @@ export class PondEngine {
   reset() {
     this.clearAll(true);
     this.populateStartingScene();
+    this.splats = [];
+    this.fluid.clear();
   }
 
   private liveCount(list: { dying: boolean }[]) {
@@ -360,7 +390,85 @@ export class PondEngine {
     for (const k of this.koi) k.update(dt, ctx);
     for (const p of this.plants) p.update(dt, this.opts.reducedMotion || this.opts.still ? 0 : 1);
     for (const k of this.koi) k.writeMesh(this.time, m);
+    this.addKoiWakes(dt);
+    this.fluid.step(dt, this.splats.splice(0, MAX_SPLATS));
+    this.compositeMaterial.uniforms.tFlow.value = this.fluid.texture;
     this.sweepDead();
+  }
+
+  /* ------------------------------------------------------------ interaction */
+
+  /** Queue one disturbance of the water (also nudges nearby floating plants). */
+  private pushSplat(s: Splat) {
+    if (this.opts.still) return;
+    const k = this.opts.reducedMotion ? 0.4 : 1;
+    this.splats.push({ ...s, flow: s.flow * k, height: s.height * k });
+    if (this.splats.length > MAX_SPLATS * 3) this.splats.splice(0, this.splats.length - MAX_SPLATS * 3);
+  }
+
+  /**
+   * Stir the water along a pointer segment. Strength follows pointer speed, so a slow
+   * hover barely moves the surface and a quick drag sets up a wider current and wake.
+   */
+  stirSegment(x0: number, y0: number, x1: number, y1: number, dt: number) {
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1e-5) return;
+    // Normalise by on-screen size so the same finger speed stirs equally on a phone and a desktop.
+    const screenScale = this.cssW / 900;
+    const speed = Math.min((dist / Math.max(dt, 1 / 240)) * screenScale, 2.4);
+    const vx = (dx / dist) * speed;
+    const vy = (dy / dist) * speed;
+    const radius = (0.05 + 0.03 * Math.min(1, speed / 1.5)) * clamp(900 / this.cssW, 1, 1.7);
+    const n = Math.min(4, Math.max(1, Math.ceil(dist / (radius * 0.9))));
+    const power = Math.min(1, speed / 1.2);
+    for (let i = 1; i <= n; i++) {
+      const f = i / n;
+      const x = x0 + dx * f;
+      const y = y0 + dy * f;
+      if (x < 0.02 || x > POND_W - 0.02 || y < 0.02 || y > POND_H - 0.02) continue;
+      this.pushSplat({ x, y, vx, vy, flow: 0.55 * power / Math.sqrt(n), height: -0.075 * power / Math.sqrt(n), radius });
+    }
+    const mid = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+    for (const p of this.plants) {
+      const ddx = p.x - mid.x;
+      const ddy = p.y - mid.y;
+      const d = Math.hypot(ddx, ddy);
+      const reach = p.radius + 0.1;
+      if (d < reach) {
+        const f = 1 - d / reach;
+        p.nudge(vx * 0.05 * f, vy * 0.05 * f, ((ddx * vy - ddy * vx) / (d + 0.05)) * 0.12 * f);
+      }
+    }
+  }
+
+  /** A tap: gentle splash where the new item arrives, then create the item. */
+  tap(x: number, y: number) {
+    const kind = this.spawnRandom(x, y);
+    this.pushSplat({ x, y, vx: 0, vy: 0, flow: 0, height: kind === "koi" ? -0.2 : -0.14, radius: 0.06 });
+    return kind;
+  }
+
+  /** Keyboard / assistive path: add one item at a random spot on the water. */
+  tapRandom() {
+    return this.tap(range(Math.random, 0.3, POND_W - 0.3), range(Math.random, 0.25, POND_H - 0.25));
+  }
+
+  /** Swimming koi disturb the water very slightly, tying fish and surface together. */
+  private addKoiWakes(dt: number) {
+    if (this.motion === 0) return;
+    this.wakeClock += dt;
+    if (this.wakeClock < 0.12) return;
+    this.wakeClock = 0;
+    for (const k of this.koi) {
+      if (k.dying || k.fade < 0.8) continue;
+      const spine = k.getSpine();
+      const tail = spine[spine.length - 5];
+      const vx = Math.cos(k.heading) * k.speed;
+      const vy = Math.sin(k.heading) * k.speed;
+      this.pushSplat({ x: tail.x, y: tail.y, vx, vy, flow: 0.1, height: -0.012, radius: 0.045 });
+    }
   }
 
   private sweepDead() {
@@ -394,6 +502,17 @@ export class PondEngine {
     this.renderer.render(this.mainScene, this.camera);
   }
 
+  /** Debug: current peak flow / wave height in the water simulation. */
+  fluidStats() {
+    return this.fluid.stats();
+  }
+
+  /** Debug: scale the refraction (0 disables it) to isolate its effect in comparisons. */
+  setRefraction(strength: number, ambient: number) {
+    this.compositeMaterial.uniforms.uStrength.value = strength;
+    this.compositeMaterial.uniforms.uAmbient.value = ambient;
+  }
+
   /** Lightweight state snapshot for automated verification. */
   snapshot() {
     return {
@@ -420,7 +539,10 @@ export class PondEngine {
     this.resizeObserver?.disconnect();
     for (const k of this.koi) k.dispose();
     for (const p of this.plants) p.dispose();
+    this.detachInput?.();
+    this.fluid.dispose();
     this.underTarget.dispose();
+    this.maskTarget.dispose();
     this.renderer.dispose();
   }
 }

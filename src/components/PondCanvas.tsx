@@ -72,6 +72,7 @@ export const PondCanvas = forwardRef<PondHandle>(function PondCanvas(_props, ref
       <canvas
         ref={canvasRef}
         className={`pond-canvas${state === "ready" ? " is-ready" : ""}`}
+        tabIndex={0}
         role="img"
         aria-label="A watercolor koi pond with koi, lily pads and lotus flowers. Tap the water to add something new."
       />

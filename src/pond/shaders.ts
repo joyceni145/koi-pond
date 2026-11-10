@@ -191,7 +191,7 @@ void main(){
     cos(p.x * 8.0 + t * 0.47) + cos((p.y - p.x) * 7.0 + t * 0.31) + vnoise(p * 5.0 - t * 0.06 + 11.0) - 0.5
   ) * 0.00085 * uAmbient;
 
-  vec2 off = (flow * 0.052 + grad * 0.55) * uStrength + amb;
+  vec2 off = (flow * 0.032 + grad * 0.42) * uStrength + amb;
 
   // Faint dispersion: the three channels refract a hair apart.
   vec3 col;
@@ -245,6 +245,17 @@ void main(){
   float mottle = fbm(w * 14.0 + 40.0);
   a *= mix(1.0, 0.82 + 0.35 * mottle, smoothstep(0.0, 0.5, 1.0 - a) * smoothstep(1.0, 0.4, a));
   a = clamp(a, 0.0, 1.0);
+  gl_FragColor = vec4(a, a, a, a);
+}
+`;
+
+/** Per-frame mask application: one texture read of the pre-baked irregular mask. */
+export const MASK_APPLY_FRAG = /* glsl */ `
+precision highp float;
+uniform sampler2D tMask;
+varying vec2 vUv;
+void main(){
+  float a = texture2D(tMask, vUv).r;
   gl_FragColor = vec4(a, a, a, a);
 }
 `;
