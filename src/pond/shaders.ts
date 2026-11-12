@@ -44,9 +44,9 @@ varying vec2 vUv;
 ${NOISE_GLSL}
 
 void main(){
-  float ca = uWorld.x / uWorld.y;
-  float ia = 1.7778;
-  vec2 q = vec2((vUv.x - 0.5) * ca / ia + 0.5, vUv.y);
+  // The wash is mapped in world units (isotropic), so it keeps the same scale at any pond shape.
+  // The texture mirrors at its edges, which lets wide or tall ponds read beyond one painting.
+  vec2 q = vec2(0.5 + (vUv.x - 0.5) * uWorld.x * 0.467, 0.5 + (vUv.y - 0.5) * uWorld.y * 0.833);
   float t = uTime;
 
   vec2 d1 = vec2(sin(t * 0.021), cos(t * 0.017)) * 0.012;
@@ -84,7 +84,7 @@ void main(){
   col += (la - 0.30) * 0.10;
 
   // Soft large-scale tonal drift, like water laid on a damp page.
-  float cloud = fbm(vUv * vec2(3.0, 2.0) + vec2(t * 0.004, -t * 0.003));
+  float cloud = fbm(vUv * uWorld * 1.67 + vec2(t * 0.004, -t * 0.003));
   col *= 0.95 + cloud * 0.12;
 
   // Paper-tooth granulation: pigment settles in the grain of the paper.
@@ -159,13 +159,14 @@ void main(){
 `;
 
 /**
- * Surface pass. Refracts the submerged scene by the fluid flow + wave gradient and a
- * very gentle ambient swell, then lays a faint water tint and sheen over the fish.
+ * Surface pass. Reads the wave height field, derives the surface normal from it and refracts the
+ * submerged scene by that normal (the jQuery Ripples model), plus a thin specular glint on the
+ * slopes that face the light. A very faint ambient swell keeps still water from looking frozen.
  */
 export const COMPOSITE_FRAG = /* glsl */ `
 precision highp float;
 uniform sampler2D tUnder;
-uniform sampler2D tFlow;
+uniform sampler2D tFlow;      // R = wave height, G = velocity
 uniform vec2 uFlowTexel;
 uniform float uTime;
 uniform float uAmbient;
@@ -174,15 +175,19 @@ uniform vec2 uWorld;
 varying vec2 vUv;
 ${NOISE_GLSL}
 
+// How far (world units) a steep ripple slope bends the view of the water beneath.
+const float PERTURBANCE = 0.022;
+// Cell size used to turn height differences into slopes (1 / 512, as in jQuery Ripples).
+const float CELL = 0.001953125;
+
 void main(){
-  vec4 f = texture2D(tFlow, vUv);
-  vec2 flow = f.xy;
-  float hC = f.z;
-  float hL = texture2D(tFlow, vUv - vec2(uFlowTexel.x, 0.0)).z;
-  float hR = texture2D(tFlow, vUv + vec2(uFlowTexel.x, 0.0)).z;
-  float hD = texture2D(tFlow, vUv - vec2(0.0, uFlowTexel.y)).z;
-  float hU = texture2D(tFlow, vUv + vec2(0.0, uFlowTexel.y)).z;
-  vec2 grad = vec2(hR - hL, hU - hD);
+  float hC = texture2D(tFlow, vUv).x;
+  float hR = texture2D(tFlow, vUv + vec2(uFlowTexel.x, 0.0)).x;
+  float hU = texture2D(tFlow, vUv + vec2(0.0, uFlowTexel.y)).x;
+  float a = hR - hC;
+  float b = hU - hC;
+  // normalize(cross(ddy, ddx)).xz, written out: the slope direction, saturating on steep crests.
+  vec2 offset = vec2(a, b) / sqrt(a * a + b * b + CELL * CELL);
 
   float t = uTime;
   vec2 p = vUv * uWorld;
@@ -191,35 +196,34 @@ void main(){
     cos(p.x * 8.0 + t * 0.47) + cos((p.y - p.x) * 7.0 + t * 0.31) + vnoise(p * 5.0 - t * 0.06 + 11.0) - 0.5
   ) * 0.00085 * uAmbient;
 
-  vec2 off = (flow * 0.032 + grad * 0.42) * uStrength + amb;
-
-  // Faint dispersion: the three channels refract a hair apart.
-  vec3 col;
-  col.r = texture2D(tUnder, vUv + off * 1.07).r;
-  col.g = texture2D(tUnder, vUv + off).g;
-  col.b = texture2D(tUnder, vUv + off * 0.93).b;
+  vec2 shift = (offset * PERTURBANCE * uStrength) / uWorld + amb;
+  vec3 col = texture2D(tUnder, vUv + shift).rgb;
 
   // Water body tint over everything submerged.
   col = mix(col, vec3(0.10, 0.34, 0.46), 0.05);
 
-  // Soft sheen where the surface tilts toward the light, plus a trace of ambient glint.
-  vec2 n2 = grad * 14.0 * uStrength + amb * 90.0;
-  float sheen = smoothstep(0.02, 0.35, dot(n2, normalize(vec2(-0.6, 0.8))));
-  float shade = smoothstep(0.02, 0.35, -dot(n2, normalize(vec2(-0.6, 0.8))));
-  col += vec3(0.55, 0.85, 0.9) * sheen * 0.075;
-  col *= 1.0 - shade * 0.05;
+  // Specular glint, lit from the upper left; pale blue-white so it reads as light on wet pigment.
+  float spec = pow(max(0.0, dot(offset, normalize(vec2(-0.6, 1.0)))), 4.0) * uStrength;
+  float shade = pow(max(0.0, dot(offset, normalize(vec2(0.6, -1.0)))), 3.0) * uStrength;
+  col *= 1.0 - shade * 0.15;
+  col += vec3(0.78, 0.94, 1.0) * spec * 0.55;
 
   gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 `;
 
-/** Multiplies the finished pond by an irregular, watercolor-bled transparency mask. */
+/**
+ * Multiplies the finished pond by an irregular, watercolor-bled transparency mask.
+ * Everything is sized in screen pixels (via uUnit) so the deckled edge is the same
+ * handful of pixels wide on a phone and on a large display, and never crosses the paper margin.
+ */
 export const MASK_FRAG = /* glsl */ `
 precision highp float;
 uniform vec2 uWorld;
 uniform vec2 uOrigin;
 uniform vec2 uPond;
 uniform vec2 uPx;
+uniform float uUnit;
 varying vec2 vUv;
 ${NOISE_GLSL}
 
@@ -229,21 +233,25 @@ float sdRoundBox(vec2 p, vec2 b, float r){
 }
 
 void main(){
+  float pu = 1.0 / uUnit;                       // world units per screen pixel
   vec2 w = uOrigin + vec2(vUv.x, 1.0 - vUv.y) * uWorld;
   vec2 p = w - uPond * 0.5;
 
-  float d = sdRoundBox(p, uPond * 0.5 - vec2(0.045), 0.17);
+  // Generously rounded corners: a pond that was painted, not a cropped rectangle.
+  float d = sdRoundBox(p, uPond * 0.5, min(0.30, min(uPond.x, uPond.y) * 0.22));
 
   // Irregular edge: slow undulation + mid-scale bleeds + fine pigment tooth.
-  float n  = (fbm(w * 2.2 + 3.0) - 0.5) * 0.070;
-  float n2 = (fbm(w * 7.0 + 19.0) - 0.5) * 0.026;
-  float n3 = (vnoise(w * 40.0) - 0.5) * 0.012;
+  float n  = (fbm(w * 2.4 + 3.0) - 0.5) * 38.0 * pu;
+  float n2 = (fbm(w * 7.5 + 19.0) - 0.5) * 16.0 * pu;
+  float n3 = (vnoise(w * 40.0) - 0.5) * 5.0 * pu;
   float edge = d + n + n2 + n3;
 
-  float a = 1.0 - smoothstep(-0.075, 0.040, edge);
+  // Pigment soaks into the paper over a soft, damp band: fully opaque 20px inside the edge,
+  // gone 7px outside it (the margin is 40px, so the paper always shows beyond).
+  float a = 1.0 - smoothstep(-20.0 * pu, 7.0 * pu, edge);
   // Blotchy, transparent-wash fade rather than a clean gradient.
   float mottle = fbm(w * 14.0 + 40.0);
-  a *= mix(1.0, 0.82 + 0.35 * mottle, smoothstep(0.0, 0.5, 1.0 - a) * smoothstep(1.0, 0.4, a));
+  a *= mix(1.0, 0.80 + 0.40 * mottle, smoothstep(0.0, 0.5, 1.0 - a) * smoothstep(1.0, 0.4, a));
   a = clamp(a, 0.0, 1.0);
   gl_FragColor = vec4(a, a, a, a);
 }

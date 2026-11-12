@@ -3,9 +3,10 @@
 A quiet, interactive watercolor koi pond for the web, built with React, TypeScript and WebGL (three.js).
 No backend, accounts or database.
 
-- Painted, transparent watercolor artwork: water, six koi varieties, lily pads, lotus flowers and reeds.
+- Painted, transparent watercolor artwork: water, six koi varieties, lily pads and lotus flowers.
 - Koi are **deformable textured meshes**: the painting itself bends, so markings stay attached to the body.
-- Pointer movement stirs a **GPU fluid simulation** that refracts the water *and* the submerged koi together.
+- Pointer movement stirs a **GPU ripple simulation** that refracts the water *and* the submerged koi together.
+- The pond fills the viewport, leaving 40px of paper on every side, and re-fits live when the window resizes or rotates.
 - Floating pads and lotus flowers sit above everything, hide the fish beneath them and stay legible.
 - Tap to add a koi (65%), lily pad (25%) or opened lotus (10%). Reset restores the opening scene.
 
@@ -26,22 +27,28 @@ Query flags for development: `?debug` exposes `window.__pond`, `?solo` shows one
 Render order (back to front), in `src/pond/engine.ts`:
 
 1. **Underwater pass** (to an offscreen texture): layered painted water + animated koi meshes.
-2. **Surface pass**: samples that texture through the fluid's flow and wave gradient (refraction), adds a faint
+2. **Surface pass**: samples that texture through the wave field's slope (refraction), adds a faint
    water tint, a trace of chromatic dispersion and a soft sheen.
 3. **Floating plants**: soft contact shadow, then the lily pad / lotus sprite, unrefracted.
 4. **Pond mask**: an irregular, watercolor-bled transparency mask (baked once per resize) fades the pond into the paper.
 
-The page paper tone and grain are CSS; reeds are painted sprites placed in the DOM with a very slow sway.
+The page paper tone and grain are CSS. The caption and Reset button sit on the water: paper-white lettering over a soft pool
+of deep pigment, and a paper-coloured chip for the button, so they stay legible whatever swims beneath.
+
+The canvas is the whole viewport. `layoutWorld` (in `constants.ts`) fits the world to it on every resize: the pond is the viewport
+minus 40px, one world unit follows 80% of the pond's shorter side (190 to 800 px), so fish stay a sensible size on a phone and a large
+display, and a larger pond gets a few more fish and pads in its opening scene. The pond mask is sized in screen pixels.
 
 | Path | Role |
 | --- | --- |
 | `src/pond/koi.ts` | Koi mesh deformation, steering and spine model |
-| `src/pond/fluid.ts` | Ping-pong half-float flow + damped wave field |
+| `src/pond/fluid.ts` | Ping-pong half-float damped wave field (ripples) |
 | `src/pond/plants.ts` | Floating lily pads and lotus flowers |
 | `src/pond/engine.ts` | Renderer, passes, spawning, caps, input hooks |
 | `src/pond/input.ts` | Pointer handling, tap vs drag |
+| `src/pond/audio.ts` | Plays the two recorded water sounds, quietly (Web Audio) |
 | `src/pond/shaders.ts` | All GLSL (water, koi, composite, mask) |
-| `src/components/` | React shell (canvas host, reeds) |
+| `src/components/` | React shell (canvas host) |
 | `tools/process_assets.py` | Keys and slices the raw paintings into transparent assets |
 | `tools/raw/` | The original generated paintings (inputs to the script) |
 | `tools/verify/` | Browser-driven verification scripts (see below) |
@@ -63,20 +70,43 @@ rows are offsets from that spine, so the painting is re-laid along a curve inste
 
 ### Water interaction
 
-`fluid.ts` keeps a 320 x 213 RGBA half-float field: flow velocity (self-advected, diffused, decaying) and a damped
-wave-height field with extra viscosity so a disturbance blooms and dissolves instead of travelling as a crisp ring.
-Pointer motion injects flow along its direction; strength follows pointer speed and is normalised by canvas size so a phone and a desktop feel alike.
-The surface pass displaces the underwater image by the flow and wave gradient. Floating plants are drawn after it, so they are not refracted; they get
-a small physical nudge from nearby stirring instead. Koi tails add a barely-there wake.
+The ripples follow the model behind [jQuery Ripples](https://github.com/sirxemic/jquery.ripples) (the effect on the
+[Water Ripple Animation](https://water-ripple-animation.webflow.io/) page). `fluid.ts` keeps a half-float height + velocity field
+(about 512 x 340 square cells): each cell is pulled toward the average of its four neighbours, so a drop sends out crisp circular rings
+that race across the pond and lose energy slowly (x0.995 per 60 Hz step). The border of the canvas absorbs waves so nothing rings back out
+of the blank paper.
+
+A drop is a smooth cosine bump added to the height field. Moving the pointer over the water lays small drops along its path (about 24 px
+radius, a little firmer when the stroke is quicker; kept deliberately soft), a tap drops one big ring, and swimming koi leave very faint wake drops with their tails.
+
+The surface pass turns height differences into a slope, bends the view of the submerged koi by it (*perturbance*), adds a pale specular
+glint on slopes that face the light (upper left) and a faint shade on the opposite side. Floating plants are drawn after it, so they are not
+refracted; they get a small physical nudge from nearby stirring instead.
 
 Tap vs drag: a press that ends within ~550 ms and a few pixels of its start (6 px mouse, 10 px touch) is a tap and adds an item.
 Anything that travels further is a drag and only stirs. Mouse hover also stirs. Taps on the faded margin are ignored.
+
+### Sound
+
+Two recorded sounds from [Pixabay](https://pixabay.com/) (Pixabay Content License), in `public/assets/audio/`:
+
+- **Moving over the water**: a single drop and its spreading ripple, cut from "random water drop ripple" by Soul_Serenity_Sounds. The recording is mostly
+  silence with two drops in it; one of the two plays at random, a little faster or slower each time. It is very quiet (about -33 to -29 dBFS) and rare,
+  and it only ever plays while the cursor is actually moving: `audio.drip()` is called only from the pointer-move handler, only after the cursor moved
+  more than 3 px (speed = distance / 40 px), stays silent below speed 0.2 or if the cursor had been still for more than 150 ms, allows one drip voice at
+  a time, waits 4-5 s between drops and then fires with only a 12-32% chance.
+- **Click**: "water drop" by freesound_community, on every tap (about -18 dBFS).
+
+Both recordings are loud and sharp as supplied, so `audio.ts` lowers each one a long way, rounds the top off with a low-pass filter (4.5 kHz hover, 6 kHz click),
+fades them in and out, pans them gently with the cursor position and passes everything through a soft limiter. Browsers only allow audio after a gesture, so
+sound begins with the first press or key. The speaker button next to Reset turns it off; the choice is remembered. Reduced-motion users get it at 60% level.
+The originals are kept in `sounds/`.
 
 ### Caps and motion preferences
 
 Caps: 12 koi, 14 lily pads, 6 lotus flowers. At a cap, the oldest item of that kind fades out as the new one fades in.
 The pixel ratio is capped (2x, ~3.4 MP) and steps down automatically if the frame rate stays low.
-With `prefers-reduced-motion`, koi swim at 40% speed with a gentler wave, ambient shimmer is off, refraction and stirring are weaker, plants stop bobbing and reeds stop swaying.
+With `prefers-reduced-motion`, koi swim at 40% speed with a gentler wave, ambient shimmer is off, refraction and ripples are weaker, plants stop bobbing and .
 The canvas is keyboard-focusable: Enter or Space adds an item.
 
 ## Artwork
@@ -108,8 +138,7 @@ No reference sheet, grey background, labels or rectangular crops are displayed.
 ## Known limitations
 
 - Verified in headless Chrome using **software WebGL (SwiftShader)**, so GPU frame rates were not measured. The simulation, skinning and
-  scene update cost about 1.5 ms of JavaScript per frame at the object caps; the GPU work is five full-canvas passes at most plus a 320 x 213 simulation.
+  scene update cost about 1.5 ms of JavaScript per frame at the object caps; the GPU work is five full-canvas passes at most plus a 512 x 340 simulation.
 - The generated koi, lotus and pad art is fixed-resolution (koi 1100 px long, lotus about 280 px across); very large or high-DPI displays will show it softly.
 - The lotus paintings are three-quarter views, not strictly top-down, and are only rotated a little so they stay upright.
-- On landscape phones the pond is small because the layout is height-limited.
 - Distortion of fish and water is intentionally subtle; it is best judged in motion rather than in stills.

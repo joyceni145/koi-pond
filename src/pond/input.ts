@@ -29,6 +29,7 @@ export function attachPointerInput(canvas: HTMLCanvasElement, engine: PondEngine
 
   const onDown = (e: PointerEvent) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    engine.unlockAudio();
     try {
       canvas.setPointerCapture(e.pointerId);
     } catch {
@@ -70,6 +71,8 @@ export function attachPointerInput(canvas: HTMLCanvasElement, engine: PondEngine
     }
     const events = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [];
     const list = events.length ? events : [e];
+    const fromX = tr.lastX;
+    const fromY = tr.lastY;
     for (const ev of list) {
       const dt = (ev.timeStamp - tr.lastT) / 1000;
       const dx = ev.clientX - tr.lastX;
@@ -86,6 +89,9 @@ export function attachPointerInput(canvas: HTMLCanvasElement, engine: PondEngine
       tr.lastY = ev.clientY;
       tr.lastT = ev.timeStamp;
     }
+    // The hover sound is driven by real pointer movement only: how far the cursor travelled since the
+    // previous event, in CSS pixels. engine.hoverSound ignores anything under about 3 px.
+    engine.hoverSound(e.clientX, e.clientY, Math.hypot(tr.lastX - fromX, tr.lastY - fromY));
   };
 
   const onUp = (e: PointerEvent) => {
@@ -115,6 +121,7 @@ export function attachPointerInput(canvas: HTMLCanvasElement, engine: PondEngine
   const onKey = (e: KeyboardEvent) => {
     if (e.key !== "Enter" && e.key !== " ") return;
     e.preventDefault();
+    engine.unlockAudio();
     engine.tapRandom();
   };
 

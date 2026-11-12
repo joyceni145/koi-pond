@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { SpriteAsset } from "./assets";
-import { FADE_IN_SECONDS, FADE_OUT_SECONDS, POND_H, POND_W, SAFE_INSET } from "./constants";
+import { FADE_IN_SECONDS, FADE_OUT_SECONDS, POND, SAFE_INSET } from "./constants";
 import { clamp, TAU, type Rng } from "./math";
 import { SHADOW_FRAG, SPRITE_FRAG, SPRITE_VERT } from "./shaders";
 
@@ -20,6 +20,10 @@ function spriteGeometry() {
   return g;
 }
 
+/** The fastest a plant drifts (world units / s) and turns (rad / s) when stirred. */
+const MAX_DRIFT = 0.1;
+const MAX_SPIN = 0.55;
+
 export type PlantKind = "pad" | "lotus";
 
 /** A lily pad or lotus flower that floats above the koi, bobbing and drifting softly. */
@@ -34,6 +38,9 @@ export class Plant {
   readonly radius: number;
   private vx = 0;
   private vy = 0;
+  /** Push from the cursor that the plant's real velocity eases toward, so it starts to move softly. */
+  private pushX = 0;
+  private pushY = 0;
   private rot: number;
   private spin = 0;
   private readonly quadW: number;
@@ -96,15 +103,28 @@ export class Plant {
 
   /** Push the plant (called when the water is stirred nearby). */
   nudge(dx: number, dy: number, spin: number) {
-    this.vx += dx;
-    this.vy += dy;
-    this.spin += spin;
+    this.pushX += dx;
+    this.pushY += dy;
+    // However hard or often the cursor sweeps past, the plant only ever drifts and turns slowly.
+    const sp = Math.hypot(this.pushX, this.pushY);
+    if (sp > MAX_DRIFT) {
+      this.pushX *= MAX_DRIFT / sp;
+      this.pushY *= MAX_DRIFT / sp;
+    }
+    this.spin = clamp(this.spin + spin, -MAX_SPIN, MAX_SPIN);
+  }
+
+  /** The pond changed shape: keep the plant at the same relative place in the water. */
+  remap(fx: number, fy: number) {
+    this.x *= fx;
+    this.y *= fy;
+    this.clampInside();
   }
 
   private clampInside() {
     const m = SAFE_INSET.plant + this.radius * 0.85;
-    this.x = clamp(this.x, m, POND_W - m);
-    this.y = clamp(this.y, m, POND_H - m);
+    this.x = clamp(this.x, m, POND.w - m);
+    this.y = clamp(this.y, m, POND.h - m);
   }
 
   update(dt: number, motion: number) {
@@ -119,14 +139,20 @@ export class Plant {
       this.fade = Math.min(1, this.fade + dt / FADE_IN_SECONDS);
     }
 
-    // Stirred plants drift on the current, then slowly come to rest.
+    // Stirred plants ease into a slow drift on the current, then gently come to rest.
+    const ease = 1 - Math.exp(-dt * 3);
+    this.vx += (this.pushX - this.vx) * ease;
+    this.vy += (this.pushY - this.vy) * ease;
+    const fadePush = Math.exp(-dt * 2.5);
+    this.pushX *= fadePush;
+    this.pushY *= fadePush;
     this.x += this.vx * dt;
     this.y += this.vy * dt;
-    const damp = Math.exp(-dt * 0.85);
+    const damp = Math.exp(-dt * 1.1);
     this.vx *= damp;
     this.vy *= damp;
     this.rot += this.spin * dt;
-    this.spin *= Math.exp(-dt * 0.9);
+    this.spin *= Math.exp(-dt * 1.2);
     this.clampInside();
     this.apply(this.age, motion);
   }

@@ -4,6 +4,8 @@ import { PondEngine } from "../pond/engine";
 
 export interface PondHandle {
   reset(): void;
+  /** Turn the water sounds on or off. */
+  setSound(on: boolean): void;
 }
 
 declare global {
@@ -26,7 +28,14 @@ export const PondCanvas = forwardRef<PondHandle>(function PondCanvas(_props, ref
   const engineRef = useRef<PondEngine | null>(null);
   const [state, setState] = useState<"loading" | "ready" | "unsupported" | "error">("loading");
 
-  useImperativeHandle(ref, () => ({ reset: () => engineRef.current?.reset() }), []);
+  useImperativeHandle(
+    ref,
+    () => ({
+      reset: () => engineRef.current?.reset(),
+      setSound: (on: boolean) => engineRef.current?.audio.setEnabled(on),
+    }),
+    [],
+  );
 
   useEffect(() => {
     const canvas = canvasRef.current;

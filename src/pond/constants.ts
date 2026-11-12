@@ -1,28 +1,66 @@
 /**
- * World space: x right, y down. The pond itself is POND_W x POND_H units; the canvas
- * extends MARGIN beyond it on every side so the soft, irregular edge has room to fade.
+ * World space: x right, y down. The pond rectangle runs from (0, 0) to (POND.w, POND.h);
+ * the canvas covers the whole viewport, so the world extends `pad` beyond the pond on every
+ * side (exactly EDGE_PX of paper) and the soft, irregular edge bleeds into that margin.
+ *
+ * The pond is laid out to fill the viewport, so these values are live: `layoutWorld`
+ * mutates them whenever the canvas is resized. Read them at use, never cache them.
  */
-export const POND_W = 1.6;
-export const POND_H = 1.0;
-export const MARGIN = 0.1;
+
+/** Paper left between the viewport edge and the pond, in CSS pixels. */
+export const EDGE_PX = 40;
+
+/** Smallest / largest number of CSS pixels that one world unit may span. */
+const UNIT_MIN = 190;
+const UNIT_MAX = 800;
+/** One world unit is this fraction of the pond's shorter side: lower it to make everything on the pond smaller. */
+const UNIT_SCALE = 0.8;
+
+export const POND = { w: 1.6, h: 1.0 };
 
 export const WORLD = {
-  x0: -MARGIN,
-  y0: -MARGIN,
-  x1: POND_W + MARGIN,
-  y1: POND_H + MARGIN,
-  w: POND_W + 2 * MARGIN,
-  h: POND_H + 2 * MARGIN,
+  x0: 0,
+  y0: 0,
+  x1: 1.6,
+  y1: 1.0,
+  w: 1.6,
+  h: 1.0,
+  /** CSS pixels per world unit. Fish and plants are sized in world units, so this sets their on-screen size. */
+  unit: 800,
+  /** The paper margin in world units. */
+  pad: EDGE_PX / 800,
 };
+
+/**
+ * Fit the world to a canvas of `cssW` x `cssH` CSS pixels. The pond fills the canvas minus
+ * EDGE_PX on every side. One world unit follows the pond's shorter side (up to a cap), so fish
+ * keep a sensible size on a phone and on a very large display alike.
+ */
+export function layoutWorld(cssW: number, cssH: number) {
+  const pondW = Math.max(1, cssW - 2 * EDGE_PX);
+  const pondH = Math.max(1, cssH - 2 * EDGE_PX);
+  const unit = Math.min(UNIT_MAX, Math.max(UNIT_MIN, Math.min(pondW, pondH) * UNIT_SCALE));
+  const pad = EDGE_PX / unit;
+  POND.w = pondW / unit;
+  POND.h = pondH / unit;
+  WORLD.unit = unit;
+  WORLD.pad = pad;
+  WORLD.x0 = -pad;
+  WORLD.y0 = -pad;
+  WORLD.x1 = POND.w + pad;
+  WORLD.y1 = POND.h + pad;
+  WORLD.w = POND.w + 2 * pad;
+  WORLD.h = POND.h + 2 * pad;
+}
 
 /** Inset from the pond rectangle inside which the painting is fully opaque. */
 export const SAFE_INSET = {
   /** Koi heads stay inside this inset. */
-  fish: 0.235,
+  fish: 0.17,
   /** Floating plants (centre minus their radius) stay inside this inset. */
-  plant: 0.11,
+  plant: 0.07,
   /** Taps outside this inset are ignored (the faded edge is not "water"). */
-  tap: 0.045,
+  tap: 0.02,
 };
 
 export const CAPS = {

@@ -32,7 +32,6 @@ interface Manifest {
   koi: Record<string, { file: string; width: number; height: number; xHead: number; xTail: number; spine: number[]; halfWidth: number[] }>;
   pads: SpriteManifestEntry[];
   lotus: SpriteManifestEntry[];
-  reeds: SpriteManifestEntry[];
 }
 interface SpriteManifestEntry {
   file: string;

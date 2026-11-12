@@ -1,7 +1,8 @@
 import * as THREE from "three";
 import type { Assets } from "./assets";
-import { CAPS, KOI_VARIANTS, POND_H, POND_W, SAFE_INSET, SPAWN_ODDS, WORLD } from "./constants";
+import { CAPS, KOI_VARIANTS, POND, SAFE_INSET, SPAWN_ODDS, WORLD, layoutWorld } from "./constants";
 import { FluidSim, MAX_SPLATS, type Splat } from "./fluid";
+import { PondAudio } from "./audio";
 import { attachPointerInput } from "./input";
 import { Koi, randomKoiParams } from "./koi";
 import { clamp, mulberry32, range, type Rng } from "./math";
@@ -19,6 +20,9 @@ export interface EngineOptions {
 }
 
 export type SpawnKind = "koi" | "pad" | "lotus";
+
+/** Radius of a pointer drop on screen, in CSS pixels (jQuery Ripples uses 20). */
+const DROP_RADIUS_PX = 24;
 
 const MAX_PIXEL_RATIO = 2;
 const MAX_PIXELS = 3_400_000;
@@ -50,6 +54,9 @@ export class PondEngine {
   private detachInput: (() => void) | null = null;
   private wakeClock = 0;
 
+  /** Quiet water sounds for the cursor and clicks. */
+  readonly audio: PondAudio;
+
   readonly koi: Koi[] = [];
   readonly plants: Plant[] = [];
 
@@ -71,6 +78,13 @@ export class PondEngine {
     this.canvas = canvas;
     this.assets = assets;
     this.opts = opts;
+    this.audio = new PondAudio(opts.reducedMotion ? 0.6 : 1);
+
+    // The pond fills the canvas, so the world's shape must be known before anything is built.
+    const rect = canvas.getBoundingClientRect();
+    this.cssW = Math.max(1, rect.width);
+    this.cssH = Math.max(1, rect.height);
+    layoutWorld(this.cssW, this.cssH);
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
@@ -150,8 +164,9 @@ export class PondEngine {
       uniforms: {
         uWorld: { value: new THREE.Vector2(WORLD.w, WORLD.h) },
         uOrigin: { value: new THREE.Vector2(WORLD.x0, WORLD.y0) },
-        uPond: { value: new THREE.Vector2(POND_W, POND_H) },
+        uPond: { value: new THREE.Vector2(POND.w, POND.h) },
         uPx: { value: new THREE.Vector2(1, 1) },
+        uUnit: { value: WORLD.unit },
       },
       depthTest: false,
       depthWrite: false,
@@ -209,7 +224,39 @@ export class PondEngine {
     const rect = this.canvas.getBoundingClientRect();
     this.cssW = Math.max(1, rect.width);
     this.cssH = Math.max(1, rect.height);
+    this.applyWorld();
     this.applyPixelRatio();
+  }
+
+  /** Re-fit the world to the canvas: camera, every world-sized uniform, and the fluid grid. */
+  private applyWorld() {
+    const prevW = POND.w;
+    const prevH = POND.h;
+    layoutWorld(this.cssW, this.cssH);
+    const fx = POND.w / prevW;
+    const fy = POND.h / prevH;
+    if (Math.abs(fx - 1) > 1e-3 || Math.abs(fy - 1) > 1e-3) {
+      for (const k of this.koi) k.remap(fx, fy);
+      for (const p of this.plants) p.remap(fx, fy);
+    }
+    const cam = this.camera;
+    cam.left = WORLD.x0;
+    cam.right = WORLD.x1;
+    cam.top = WORLD.y0;
+    cam.bottom = WORLD.y1;
+    cam.updateProjectionMatrix();
+    this.waterMaterial.uniforms.uWorld.value.set(WORLD.w, WORLD.h);
+    this.compositeMaterial.uniforms.uWorld.value.set(WORLD.w, WORLD.h);
+    const mask = this.maskBakeMaterial.uniforms;
+    mask.uWorld.value.set(WORLD.w, WORLD.h);
+    mask.uOrigin.value.set(WORLD.x0, WORLD.y0);
+    mask.uPond.value.set(POND.w, POND.h);
+    mask.uUnit.value = WORLD.unit;
+    if (this.fluid) {
+      this.fluid.resize();
+      this.compositeMaterial.uniforms.tFlow.value = this.fluid.texture;
+      this.compositeMaterial.uniforms.uFlowTexel.value.set(1 / this.fluid.width, 1 / this.fluid.height);
+    }
   }
 
   private applyPixelRatio() {
@@ -263,22 +310,39 @@ export class PondEngine {
     return plant;
   }
 
-  /** The fixed opening scene: three koi and a few lily pads. Reset restores exactly this. */
+  /**
+   * The opening scene: three koi and a few lily pads, placed as fractions of the pond so the
+   * composition holds at any shape. A larger pond gets a few more fish and pads. Reset restores it.
+   */
   private populateStartingScene() {
     const rng = mulberry32(20240611);
-    this.makeKoi("kohaku", 0.62, 0.5, -0.5, rng, 0.42);
-    const k2 = this.makeKoi("showa", 1.0, 0.64, Math.PI * 0.85, rng, 0.36);
-    const k3 = this.makeKoi("gold", 0.86, 0.3, 0.25, rng, 0.31);
+    const W = POND.w;
+    const H = POND.h;
+    this.makeKoi("kohaku", W * 0.3875, H * 0.5, -0.5, rng, 0.46);
+    const k2 = this.makeKoi("showa", W * 0.625, H * 0.64, Math.PI * 0.85, rng, 0.33);
+    const k3 = this.makeKoi("gold", W * 0.5375, H * 0.3, 0.25, rng, 0.21);
     if (this.opts.solo) {
       for (const k of [k2, k3]) this.removeNow(k);
       return;
     }
-    const pad = (i: number, d: number, x: number, y: number) => this.makePlant("pad", i, d, x, y, rng);
-    pad(0, 0.3, 0.38, 0.3);
-    pad(7, 0.16, 1.24, 0.3);
-    pad(9, 0.21, 1.02, 0.78);
-    pad(2, 0.17, 0.52, 0.76);
-    pad(11, 0.075, 1.3, 0.62);
+    const pad = (i: number, d: number, fx: number, fy: number) => this.makePlant("pad", i, d, W * fx, H * fy, rng);
+    pad(0, 0.3, 0.2375, 0.3);
+    pad(7, 0.16, 0.775, 0.3);
+    pad(9, 0.21, 0.6375, 0.78);
+    pad(2, 0.17, 0.325, 0.76);
+    pad(11, 0.075, 0.8125, 0.62);
+
+    const area = W * H;
+    if (area > 2.4) {
+      this.makeKoi("white", W * 0.14, H * 0.66, 0.2, rng, 0.17);
+      pad(5, 0.23, 0.9, 0.7);
+      pad(3, 0.13, 0.1, 0.22);
+    }
+    if (area > 3.6) {
+      this.makeKoi("calico", W * 0.86, H * 0.22, Math.PI * 0.9, rng, 0.4);
+      pad(6, 0.19, 0.46, 0.9);
+      pad(10, 0.1, 0.4, 0.1);
+    }
   }
 
   private removeNow(k: Koi) {
@@ -325,9 +389,9 @@ export class PondEngine {
       const variant = choices[Math.floor(rng() * choices.length)];
       this.lastVariant = variant;
       const m = SAFE_INSET.fish + 0.04;
-      const cx = clamp(x, m, POND_W - m);
-      const cy = clamp(y, m, POND_H - m);
-      const toCenter = Math.atan2(POND_H / 2 - cy, POND_W / 2 - cx);
+      const cx = clamp(x, m, POND.w - m);
+      const cy = clamp(y, m, POND.h - m);
+      const toCenter = Math.atan2(POND.h / 2 - cy, POND.w / 2 - cx);
       const heading = toCenter + (rng() - 0.5) * 1.8;
       return this.makeKoi(variant, cx, cy, heading, rng);
     }
@@ -358,7 +422,7 @@ export class PondEngine {
   /** True when a world position is on the (opaque) water, not in the faded margin. */
   isWater(x: number, y: number) {
     const t = SAFE_INSET.tap;
-    return x >= t && x <= POND_W - t && y >= t && y <= POND_H - t;
+    return x >= t && x <= POND.w - t && y >= t && y <= POND.h - t;
   }
 
   clientToWorld(clientX: number, clientY: number) {
@@ -434,17 +498,17 @@ export class PondEngine {
 
   /* ------------------------------------------------------------ interaction */
 
-  /** Queue one disturbance of the water (also nudges nearby floating plants). */
+  /** Queue one drop on the water. */
   private pushSplat(s: Splat) {
     if (this.opts.still) return;
     const k = this.opts.reducedMotion ? 0.4 : 1;
-    this.splats.push({ ...s, flow: s.flow * k, height: s.height * k });
+    this.splats.push({ ...s, strength: s.strength * k });
     if (this.splats.length > MAX_SPLATS * 3) this.splats.splice(0, this.splats.length - MAX_SPLATS * 3);
   }
 
   /**
-   * Stir the water along a pointer segment. Strength follows pointer speed, so a slow
-   * hover barely moves the surface and a quick drag sets up a wider current and wake.
+   * Moving over the water drops small, evenly spaced beads along the pointer's path, each of which
+   * sends out its own ring. A quicker stroke lays down firmer drops; plants are nudged by the motion.
    */
   stirSegment(x0: number, y0: number, x1: number, y1: number, dt: number) {
     const dx = x1 - x0;
@@ -452,19 +516,20 @@ export class PondEngine {
     const dist = Math.hypot(dx, dy);
     if (dist < 1e-5) return;
     // Normalise by on-screen size so the same finger speed stirs equally on a phone and a desktop.
-    const screenScale = this.cssW / 900;
+    const screenScale = WORLD.unit / 500;
     const speed = Math.min((dist / Math.max(dt, 1 / 240)) * screenScale, 2.4);
     const vx = (dx / dist) * speed;
     const vy = (dy / dist) * speed;
-    const radius = (0.05 + 0.03 * Math.min(1, speed / 1.5)) * clamp(900 / this.cssW, 1, 1.7);
-    const n = Math.min(4, Math.max(1, Math.ceil(dist / (radius * 0.9))));
+    const radius = DROP_RADIUS_PX / WORLD.unit;
+    const n = Math.min(4, Math.max(1, Math.ceil(dist / (radius * 1.5))));
     const power = Math.min(1, speed / 1.2);
+    const strength = 0.007 + 0.005 * power;
     for (let i = 1; i <= n; i++) {
       const f = i / n;
       const x = x0 + dx * f;
       const y = y0 + dy * f;
-      if (x < 0.02 || x > POND_W - 0.02 || y < 0.02 || y > POND_H - 0.02) continue;
-      this.pushSplat({ x, y, vx, vy, flow: 0.55 * power / Math.sqrt(n), height: -0.11 * power / Math.sqrt(n), radius });
+      if (x < 0.02 || x > POND.w - 0.02 || y < 0.02 || y > POND.h - 0.02) continue;
+      this.pushSplat({ x, y, radius, strength });
     }
     const mid = { x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
     for (const p of this.plants) {
@@ -474,7 +539,7 @@ export class PondEngine {
       const reach = p.radius + 0.1;
       if (d < reach) {
         const f = 1 - d / reach;
-        p.nudge(vx * 0.05 * f, vy * 0.05 * f, ((ddx * vy - ddy * vx) / (d + 0.05)) * 0.12 * f);
+        p.nudge(vx * 0.034 * f, vy * 0.034 * f, ((ddx * vy - ddy * vx) / (d + 0.05)) * 0.065 * f);
       }
     }
   }
@@ -482,28 +547,49 @@ export class PondEngine {
   /** A tap: gentle splash where the new item arrives, then create the item. */
   tap(x: number, y: number) {
     const kind = this.spawnRandom(x, y);
-    this.pushSplat({ x, y, vx: 0, vy: 0, flow: 0, height: kind === "koi" ? -0.3 : -0.21, radius: 0.075 });
+    this.audio.tap(this.panFor(x));
+    this.pushSplat({ x, y, radius: (DROP_RADIUS_PX * 1.5) / WORLD.unit, strength: kind === "koi" ? 0.15 : 0.12 });
     return kind;
+  }
+
+  /** Stereo position (-1 left .. 1 right) of a world x, kept gentle so sounds never hard-pan. */
+  private panFor(x: number) {
+    return clamp((x / POND.w) * 2 - 1, -1, 1) * 0.5;
+  }
+
+  /**
+   * The cursor just moved `distancePx` CSS pixels to (clientX, clientY). Called from the pointer-move
+   * handler only (never from a frame loop), and only for real movement: the hover drop must not play
+   * while the cursor is still.
+   */
+  hoverSound(clientX: number, clientY: number, distancePx: number) {
+    if (distancePx <= 3) return;
+    const p = this.clientToWorld(clientX, clientY);
+    if (!this.isWater(p.x, p.y)) return;
+    this.audio.drip(Math.min(1, distancePx / 40), this.panFor(p.x));
+  }
+
+  /** Browsers allow audio only after a gesture: call this from pointerdown / keydown. */
+  unlockAudio() {
+    this.audio.unlock();
   }
 
   /** Keyboard / assistive path: add one item at a random spot on the water. */
   tapRandom() {
-    return this.tap(range(Math.random, 0.3, POND_W - 0.3), range(Math.random, 0.25, POND_H - 0.25));
+    return this.tap(range(Math.random, 0.3, Math.max(0.31, POND.w - 0.3)), range(Math.random, 0.25, Math.max(0.26, POND.h - 0.25)));
   }
 
   /** Swimming koi disturb the water very slightly, tying fish and surface together. */
   private addKoiWakes(dt: number) {
     if (this.motion === 0) return;
     this.wakeClock += dt;
-    if (this.wakeClock < 0.12) return;
+    if (this.wakeClock < 0.25) return;
     this.wakeClock = 0;
     for (const k of this.koi) {
       if (k.dying || k.fade < 0.8) continue;
       const spine = k.getSpine();
       const tail = spine[spine.length - 5];
-      const vx = Math.cos(k.heading) * k.speed;
-      const vy = Math.sin(k.heading) * k.speed;
-      this.pushSplat({ x: tail.x, y: tail.y, vx, vy, flow: 0.1, height: -0.012, radius: 0.045 });
+      this.pushSplat({ x: tail.x, y: tail.y, radius: (DROP_RADIUS_PX * 0.8) / WORLD.unit, strength: 0.002 });
     }
   }
 
@@ -578,6 +664,7 @@ export class PondEngine {
     this.canvas.removeEventListener("webglcontextlost", this.onContextLost);
     this.canvas.removeEventListener("webglcontextrestored", this.onContextRestored);
     this.detachInput?.();
+    this.audio.dispose();
     this.fluid?.dispose();
     this.blankFlow.dispose();
     this.underTarget.dispose();

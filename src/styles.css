@@ -2,6 +2,9 @@
   --paper: #f4f1ec;
   --ink: #8a8274;
   --ink-soft: rgba(112, 102, 86, 0.38);
+  /* Text that sits on the water: paper-white lettering, and the deep indigo of the pigment pools. */
+  --on-water: #f7f3ea;
+  --deep: #0b2f4c;
   color-scheme: light;
 }
 
@@ -12,8 +15,8 @@
 html,
 body {
   margin: 0;
-  overflow-x: hidden;
-  min-height: 100%;
+  height: 100%;
+  overflow: hidden;
   background: var(--paper);
   color: var(--ink);
   -webkit-text-size-adjust: 100%;
@@ -30,24 +33,10 @@ body::after {
   mix-blend-mode: multiply;
 }
 
+/* The canvas is the whole viewport; the pond inside it keeps a 40px margin of paper (see EDGE_PX). */
 .page {
-  min-height: 100vh;
-  min-height: 100svh;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 2vh 0 3vh;
-  gap: 0;
-}
-
-/* The canvas covers the pond plus a feathering margin on every side. */
-.stage {
-  position: relative;
-  width: min(104vw, 1040px, calc((100vh - 150px) * 1.5));
-  width: min(104vw, 1040px, calc((100svh - 150px) * 1.5));
-  aspect-ratio: 1.8 / 1.2;
-  flex: none;
+  position: fixed;
+  inset: 0;
 }
 
 .pond-canvas {
@@ -72,49 +61,102 @@ body::after {
 }
 
 .pond-canvas:focus-visible {
-  outline: 1px dashed var(--ink-soft);
-  outline-offset: -8px;
+  outline: 1px dashed rgba(247, 243, 234, 0.7);
+  outline-offset: -52px;
 }
 
+/* The caption floats on the water, so it is lettered in paper-white over a soft pool of deep pigment. */
 .caption {
-  margin-top: clamp(-18px, -2vh, -6px);
+  position: absolute;
+  left: 50%;
+  bottom: calc(40px + clamp(16px, 4vh, 36px));
+  transform: translateX(-50%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 14px;
+  gap: 11px;
+  width: max-content;
+  max-width: calc(100vw - 120px);
   text-align: center;
-  position: relative;
+  pointer-events: none; /* taps on the water behind the words still count */
   z-index: 2;
+  isolation: isolate;
+  opacity: 0;
+  transition: opacity 1.6s ease 0.8s;
+}
+
+.pond-canvas.is-ready ~ .caption {
+  opacity: 1;
+}
+
+/* A wet, uneven bloom of dark blue behind the words: it quiets the koi and pads passing underneath. */
+.caption::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: -28px -68px -24px;
+  background:
+    radial-gradient(46% 48% at 36% 44%, rgba(5, 30, 52, 0.86), rgba(5, 30, 52, 0) 100%),
+    radial-gradient(42% 52% at 68% 58%, rgba(7, 36, 62, 0.8), rgba(7, 36, 62, 0) 100%),
+    radial-gradient(62% 58% at 50% 50%, rgba(6, 32, 56, 0.7), rgba(6, 32, 56, 0) 100%);
+  filter: blur(6px);
+  pointer-events: none;
 }
 
 .caption p {
   margin: 0;
   font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
   font-style: italic;
-  font-size: clamp(14px, 1.6vw, 17px);
-  letter-spacing: 0.02em;
-  color: var(--ink);
+  font-size: clamp(13px, 1.25vw, 17px);
+  letter-spacing: 0.025em;
+  line-height: 1.35;
+  color: var(--on-water);
+  text-shadow:
+    0 1px 1px rgba(4, 26, 46, 0.7),
+    0 0 8px rgba(4, 26, 46, 0.75),
+    0 0 22px rgba(4, 26, 46, 0.6);
+}
+
+/* The button is a little torn-edge chip of the paper itself, lying on the water. */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .reset {
   appearance: none;
+  pointer-events: auto;
   font: inherit;
   font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
-  font-size: 13px;
-  letter-spacing: 0.06em;
-  color: var(--ink);
-  background: transparent;
-  border: 1px solid var(--ink-soft);
+  font-size: 12px;
+  letter-spacing: 0.07em;
+  color: var(--deep);
+  background: rgba(247, 243, 234, 0.92);
+  border: 0;
   border-radius: 999px;
-  padding: 7px 20px 8px;
+  padding: 7px 19px 8px;
+  box-shadow:
+    0 0 0 1px rgba(247, 243, 234, 0.5),
+    0 2px 10px rgba(4, 28, 48, 0.38);
   cursor: pointer;
-  transition: background-color 0.3s ease, border-color 0.3s ease, transform 0.15s ease;
+  transition: background-color 0.3s ease, box-shadow 0.3s ease, transform 0.15s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
+.reset.sound {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  width: 32px;
+  height: 31px;
+}
+
 .reset:hover {
-  background: rgba(120, 108, 88, 0.07);
-  border-color: rgba(112, 102, 86, 0.6);
+  background: #fffdf7;
+  box-shadow:
+    0 0 0 1px rgba(255, 253, 247, 0.75),
+    0 3px 14px rgba(4, 28, 48, 0.46);
 }
 
 .reset:active {
@@ -122,7 +164,7 @@ body::after {
 }
 
 .reset:focus-visible {
-  outline: 2px solid rgba(70, 120, 140, 0.55);
+  outline: 2px solid var(--on-water);
   outline-offset: 3px;
 }
 
@@ -138,47 +180,7 @@ body::after {
   color: var(--ink);
 }
 
-.reeds {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-/* Outer element anchors the clump's base; the inner sway pivots around it. */
-.reed {
-  position: absolute;
-  aspect-ratio: 228 / 360;
-  transform: translate(-50%, -94%);
-  opacity: 0;
-  transition: opacity 2s ease 0.6s;
-}
-
-.reed img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  transform-origin: 50% 94%;
-  animation: reed-sway var(--dur, 9s) ease-in-out var(--delay, 0s) infinite alternate;
-  user-select: none;
-}
-
-.pond-canvas.is-ready ~ .reeds .reed {
-  opacity: 0.92;
-}
-
-@keyframes reed-sway {
-  from {
-    rotate: calc(var(--amp, 1.4deg) * -1);
-  }
-  to {
-    rotate: var(--amp, 1.4deg);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .reed img {
-    animation: none;
-  }
   .pond-canvas {
     transition: none;
   }

@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { KoiAsset } from "./assets";
-import { FADE_IN_SECONDS, FADE_OUT_SECONDS, POND_H, POND_W, SAFE_INSET, WATER_TINT } from "./constants";
+import { FADE_IN_SECONDS, FADE_OUT_SECONDS, POND, SAFE_INSET, WATER_TINT } from "./constants";
 import { angleDiff, clamp, smoothstep, TAU, type Rng, range } from "./math";
 import { KOI_FRAG, KOI_VERT } from "./shaders";
 
@@ -220,7 +220,7 @@ export class Koi {
     // Steer away from the faded edge. A probe point ahead of the head lets the fish begin a
     // wide, relaxed turn early; this takes priority over wandering and courtesy.
     const inset = SAFE_INSET.fish;
-    const bx0 = inset, bx1 = POND_W - inset, by0 = inset, by1 = POND_H - inset;
+    const bx0 = inset, bx1 = POND.w - inset, by0 = inset, by1 = POND.h - inset;
     const turnRadius = p.length / 2.1;
     const look = turnRadius * 1.55 + 0.1;
     const px = this.x + Math.cos(this.heading) * look;
@@ -229,7 +229,7 @@ export class Koi {
     const penHere = Math.max(bx0 - this.x, this.x - bx1, by0 - this.y, this.y - by1, 0);
     const wall = Math.max(smoothstep(0, 0.06, penAhead), smoothstep(0, 0.04, penHere));
     if (wall > 0) {
-      const toCenter = Math.atan2(POND_H * 0.5 - this.y, POND_W * 0.5 - this.x);
+      const toCenter = Math.atan2(POND.h * 0.5 - this.y, POND.w * 0.5 - this.x);
       const diff = angleDiff(this.heading, toCenter);
       want = want * (1 - wall) + clamp(diff * 2.4, -1.5, 1.5) * wall;
     }
@@ -260,6 +260,22 @@ export class Koi {
     const speedRatio = p.speed > 0 ? clamp(this.speed / p.speed, 0.2, 1.4) : 1;
     this.clock += dt * p.beat * (0.55 + 0.45 * speedRatio) * m;
 
+    this.updateChain();
+  }
+
+  /**
+   * The pond changed shape (window resize or rotation): carry the fish along with it, keeping its
+   * relative place in the water. Joints are re-derived from the trail every frame, so the body
+   * re-lays itself along the scaled path.
+   */
+  remap(fx: number, fy: number) {
+    this.x *= fx;
+    this.y *= fy;
+    this.heading = Math.atan2(Math.sin(this.heading) * fy, Math.cos(this.heading) * fx);
+    for (let i = 0; i < this.trailX.length; i++) {
+      this.trailX[i] *= fx;
+      this.trailY[i] *= fy;
+    }
     this.updateChain();
   }
 
@@ -474,7 +490,8 @@ export class Koi {
 }
 
 export function randomKoiParams(rng: Rng, length?: number): KoiParams {
-  const len = length ?? range(rng, 0.27, 0.42);
+  // A mixed school: mostly young and middling fish, with the odd big old one.
+  const len = length ?? 0.15 + 0.32 * Math.pow(rng(), 1.3);
   return {
     length: len,
     // Larger koi cruise a touch faster in absolute terms, but slower relative to length.
